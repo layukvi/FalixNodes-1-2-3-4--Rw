@@ -6,8 +6,8 @@ on:
       accounts:
         description: '指定邮箱（留空全部，多个用逗号）'
         required: false
-#  schedule:
-#    - cron: '0 */6 * * *'  # 每 6 小时执行一次
+  schedule:
+    - cron: '0 */6 * * *'  # 每 6 小时自动执行一次
 
 jobs:
   restart:
@@ -29,7 +29,7 @@ jobs:
       - name: 安装依赖
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg xvfb
           pip install -q seleniumbase requests pyvirtualdisplay
 
       - name: 配置代理
@@ -81,16 +81,16 @@ jobs:
           
           python main.py
 
-#      - name: 上传截图
-#        if: always()
-#        uses: actions/upload-artifact@v4
-#        with:
-#          name: screenshots-${{ github.run_number }}
-#          path: output/falix/*.png
-#          retention-days: 7
-#          if-no-files-found: ignore
+      - name: 上传运行截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_number }}
+          path: output/falix/*.png
+          retention-days: 7
+          if-no-files-found: ignore
 
-      - name: 清理运行记录
+      - name: 清理历史运行记录
         if: always()
         uses: Mattraks/delete-workflow-runs@v2
         with:
