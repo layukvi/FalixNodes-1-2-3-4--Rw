@@ -1,87 +1,262 @@
-# ---------- 从页面解析服务器列表 (优化版) ----------
-def fetch_servers_from_page(sb, email: str) -> Tuple[List[Dict], str]:
-    email_safe = email_to_filename(email)
-    
-    # 1. 检查当前是否已经在主页，不在才需要 open，避免二次刷新触发拦截
-    cur_url = safe_get_url(sb)
-    if BASE_URL not in cur_url or "/auth/" in cur_url:
-        sb.open(BASE_URL)
-        time.sleep(3)
-        
-    handle_cookie_consent(sb)
-    last_shot = shot(sb, f"homepage-{email_safe}")
+#!/usr/bin/env python3
 
-    # 2. 通用选择器列表（匹配 FalixNodes 各种新旧改版UI）
-    target_selectors = [
-        "a[href*='/server/']",
-        "a.server-row-link",
-        ".servers-container",
-        "[class*='server-card']",
-        "[class*='server-item']"
+import os
+import sys
+import time
+import json
+import platform
+import random
+import re
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple
+from datetime import datetime, timezone, timedelta
+
+import requests
+from seleniumbase import SB
+
+# ---------- 配置 ----------
+BASE_URL   = "https://client.falixnodes.net"
+LOGIN_URL  = f"{BASE_URL}/auth/login"
+OUTPUT_DIR = Path("output/falix")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+MAX_RETRY      = 3
+AD_RETRY_LIMIT = 10  # Start 重试次数
+CN_TZ = timezone(timedelta(hours=8))
+
+screenshot_counter = {"count": 0}
+
+
+# ---------- 工具函数 ----------
+def cn_time() -> str:
+    return datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def is_linux() -> bool:
+    return platform.system().lower() == "linux"
+
+
+def email_to_filename(email: str) -> str:
+    if not email or "@" not in email:
+        return "unknown"
+    local, domain = email.split("@", 1)
+    domain_short = domain.replace(".", "")[-4:] if domain else "xx"
+    return f"{local[0]}_{domain_short}"
+
+
+def shot(sb, name: str) -> str:
+    screenshot_counter["count"] += 1
+    ts   = datetime.now(CN_TZ).strftime("%H%M%S")
+    safe = re.sub(r'[":><|*?\r\n/\\]', "", name)
+    fp   = str(OUTPUT_DIR / f"{screenshot_counter['count']:03d}-{ts}-{safe}.png")
+    try:
+        sb.save_screenshot(fp)
+    except Exception as e:
+        print(f"[ERROR] 截图失败: {e}")
+    return fp
+
+
+def mask_email(email: str) -> str:
+    if not email or "@" not in email:
+        return "***"
+    local, domain = email.split("@", 1)
+    return f"{local[0]}***@***{domain[-2:]}"
+
+
+def safe_get_url(sb) -> str:
+    try:
+        return sb.get_current_url()
+    except Exception:
+        return ""
+
+
+def safe_get_source(sb) -> str:
+    try:
+        return sb.get_page_source()
+    except Exception:
+        return ""
+
+
+# ---------- Telegram 通知 ----------
+def notify(
+    ok: bool,
+    email: str = "",
+    summary: str = "",
+    server_details: List[Dict] = None,
+    screenshots: List[str] = None,
+):
+    token   = os.environ.get("TG_BOT_TOKEN")
+    chat_id = os.environ.get("TG_CHAT_ID")
+    if not token or not chat_id:
+        return
+
+    try:
+        text = f"{'✅ 成功' if ok else '❌ 失败'}\n"
+        text += f"账号: {email}\n"
+        text += f"信息: {summary}\n"
+        for d in (server_details or []):
+            server_display = d.get('id') or d.get('name', '?')
+            text += f"服务器: {server_display}  {d.get('status','?')}\n"
+        text += f"时间: {cn_time()}\n\nFalixNodes Auto Restart"
+
+        if screenshots:
+            last_shot = screenshots[-1]
+            if last_shot and Path(last_shot).exists():
+                with open(last_shot, "rb") as f:
+                    requests.post(
+                        f"https://api.telegram.org/bot{token}/sendPhoto",
+                        data={"chat_id": chat_id, "caption": text},
+                        files={"photo": f},
+                        timeout=60,
+                    )
+            else:
+                requests.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": text},
+                    timeout=30,
+                )
+        else:
+            requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text},
+                timeout=30,
+            )
+    except Exception as e:
+        print(f"[ERROR] TG 通知失败: {e}")
+
+
+# ---------- 解析账号 ----------
+def parse_accounts() -> List[Dict]:
+    raw = os.environ.get("FALIX", "")
+    accounts = []
+    for line in raw.strip().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "-----" not in line:
+            continue
+        email, pwd = line.split("-----", 1)
+        accounts.append({"email": email.strip(), "password": pwd.strip()})
+    return accounts
+
+
+# ---------- Cookie 弹窗处理 ----------
+def handle_cookie_consent(sb) -> bool:
+    selectors = [
+        "#accept-choices",
+        "div.sn-b-def.sn-blue",
+        "button:contains('Accept')",
+        "a:contains('Accept')",
     ]
+    for sel in selectors:
+        try:
+            sb.wait_for_element_visible(sel, timeout=3)
+            sb.click(sel)
+            print(f"[INFO] Cookie 弹窗已关闭 (点击 {sel})")
+            time.sleep(1)
+            return True
+        except Exception:
+            continue
 
-    found_selector = None
-    print("[INFO] 正在寻找服务器列表...")
-    
-    # 循环等待，最高等待 15 秒
-    start_time = time.time()
-    while time.time() - start_time < 15:
-        for sel in target_selectors:
-            if sb.is_element_visible(sel):
-                found_selector = sel
-                break
-        if found_selector:
-            break
+    try:
+        sb.execute_script("""
+            var el = document.querySelector('.sn-inner') || 
+                     document.querySelector('.sn-b-def.sn-blue')?.closest('.sn-inner');
+            if (el) el.remove();
+            var overlays = document.querySelectorAll('[class*="sn-"], [id*="accept"]');
+            for (var i=0; i<overlays.length; i++) {
+                var style = window.getComputedStyle(overlays[i]);
+                if (style.position === 'fixed' || style.position === 'absolute') {
+                    if (overlays[i].offsetHeight > 100) overlays[i].remove();
+                }
+            }
+            document.body.style.overflow = '';
+            document.documentElement.style.overflow = '';
+        """)
+    except Exception:
+        pass
+    return False
+
+
+# ---------- Turnstile 处理 ----------
+def _turnstile_token_ready(sb) -> bool:
+    try:
+        token_ok = sb.execute_script("""
+            var inp = document.querySelector("input[name='cf-turnstile-response']");
+            return inp && inp.value && inp.value.length > 20;
+        """)
+        if token_ok:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _try_click_turnstile(sb) -> bool:
+    try:
+        sb.uc_gui_click_captcha()
+        return True
+    except Exception:
+        pass
+
+    try:
+        sb.switch_to_frame("iframe[src*='challenges.cloudflare']")
+        sb.click("input[type='checkbox'], .cb-lb", timeout=2)
+        sb.switch_to_default_content()
+        return True
+    except Exception:
+        try:
+            sb.switch_to_default_content()
+        except Exception:
+            pass
+
+    try:
+        sb.execute_script("""
+            var ts = document.querySelector('.cf-turnstile');
+            if (ts) ts.click();
+        """)
+        return True
+    except Exception:
+        pass
+    return False
+
+
+def wait_turnstile(sb, timeout: int = 60) -> bool:
+    try:
+        has = sb.execute_script("""
+            return !!(
+                document.querySelector('.cf-turnstile') ||
+                document.querySelector('iframe[src*="challenges.cloudflare"]') ||
+                document.querySelector('input[name="cf-turnstile-response"]')
+            );
+        """)
+    except Exception:
+        has = False
+
+    if not has:
+        return True
+
+    print("[INFO] 发现 Turnstile，开始等待验证完成...")
+    start = time.time()
+    last_click = 0
+
+    while time.time() - start < timeout:
+        if _turnstile_token_ready(sb):
+            print("[INFO] ✅ Turnstile 验证完成")
+            time.sleep(2)
+            return True
+
+        now = time.time()
+        if now - last_click >= 4:
+            _try_click_turnstile(sb)
+            last_click = now
+
         time.sleep(1)
 
-    if not found_selector:
-        print("[ERROR] 服务器列表加载超时，未匹配到任何服务器卡片")
-        last_shot = shot(sb, f"no-servers-{email_safe}")
-        return [], last_shot
+    if _turnstile_token_ready(sb):
+        return True
 
-    print(f"[INFO] 成功匹配到服务器元素 (使用选择器: {found_selector})")
-    last_shot = shot(sb, f"servers-loaded-{email_safe}")
+    print("[WARN] ⚠️ Turnstile 等待超时")
+    return False
 
-    # 3. 提取所有匹配到的服务器链接
-    servers = []
-    try:
-        # 获取所有包含 /server/ 的 <a> 链接标签
-        rows = sb.find_elements("a[href*='/server/']")
-        print(f"[INFO] 发现 {len(rows)} 个服务器链接")
-        
-        seen_ids = set()
-        for idx, row in enumerate(rows):
-            try:
-                href = row.get_attribute("href") or ""
-                if "/server/" not in href:
-                    continue
-                
-                # 提取 server_id
-                parts = href.split("/server/")[1].split("/")
-                server_id = parts[0]
-                
-                # 过滤重复的服务器 ID
-                if not server_id or server_id in seen_ids:
-                    continue
-                seen_ids.add(server_id)
 
-                # 获取服务器名称
-                name = f"Server-{server_id[:4]}"
-                text_content = row.text.strip()
-                if text_content:
-                    # 取第一行非空文本作为名称
-                    first_line = [line.strip() for line in text_content.splitlines() if line.strip()]
-                    if first_line:
-                        name = first_line[0]
-
-                print(f"[INFO]  [{len(servers)+1}] 名称: {name} (ID: {server_id[:8]}...)")
-                servers.append({"id": server_id, "name": name})
-            except Exception as e:
-                print(f"[WARN] 解析第 {idx+1} 个服务器元素失败: {e}")
-                
-    except Exception as e:
-        print(f"[ERROR] 查找服务器链接失败: {e}")
-
-    last_shot = shot(sb, f"parsed-{len(servers)}svr-{email_safe}")
-    print(f"[INFO] 共成功解析出 {len(servers)} 个服务器")
-    return servers, last_shot
+# ---------- 登录表单处理 ----------
+def robust_fill_form(sb, email: str, password: str) -> bool:
+    email_selectors =
