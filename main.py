@@ -30,10 +30,8 @@ screenshot_counter = {"count": 0}
 def cn_time() -> str:
     return datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-
 def is_linux() -> bool:
     return platform.system().lower() == "linux"
-
 
 def email_to_filename(email: str) -> str:
     if not email or "@" not in email:
@@ -41,7 +39,6 @@ def email_to_filename(email: str) -> str:
     local, domain = email.split("@", 1)
     domain_short = domain.replace(".", "")[-4:] if domain else "xx"
     return f"{local[0]}_{domain_short}"
-
 
 def shot(sb, name: str) -> str:
     screenshot_counter["count"] += 1
@@ -54,13 +51,11 @@ def shot(sb, name: str) -> str:
         print(f"[ERROR] 截图失败: {e}")
     return fp
 
-
 def mask_email(email: str) -> str:
     if not email or "@" not in email:
         return "***"
     local, domain = email.split("@", 1)
     return f"{local[0]}***@***{domain[-2:]}"
-
 
 def safe_get_url(sb) -> str:
     try:
@@ -68,25 +63,11 @@ def safe_get_url(sb) -> str:
     except Exception:
         return ""
 
-
 def safe_get_source(sb) -> str:
     try:
         return sb.get_page_source()
     except Exception:
         return ""
-
-
-def clear_and_type(sb, selector: str, text: str) -> bool:
-    """清空输入框并输入文本，不依赖 triple_click"""
-    try:
-        sb.wait_for_element_visible(selector, timeout=10)
-        sb.execute_script(f"document.querySelector('{selector}').value = '';")
-        sb.type(selector, text)
-        return True
-    except Exception as e:
-        print(f"[ERROR] clear_and_type({selector}) 失败: {e}")
-        return False
-
 
 
 # ---------- Telegram 通知 ----------
@@ -152,7 +133,6 @@ def parse_accounts() -> List[Dict]:
 
 # ---------- Cookie 弹窗处理 ----------
 def handle_cookie_consent(sb) -> bool:
-    """等待并关闭 Cookie / 隐私同意弹窗。"""
     selectors = [
         "#accept-choices",
         "div.sn-b-def.sn-blue",
@@ -161,7 +141,7 @@ def handle_cookie_consent(sb) -> bool:
     ]
     for sel in selectors:
         try:
-            sb.wait_for_element_visible(sel, timeout=10)
+            sb.wait_for_element_visible(sel, timeout=3)
             sb.click(sel)
             print(f"[INFO] Cookie 弹窗已关闭 (点击 {sel})")
             time.sleep(1)
@@ -169,7 +149,6 @@ def handle_cookie_consent(sb) -> bool:
         except Exception:
             continue
 
-    # JS 强力清除
     try:
         sb.execute_script("""
             var el = document.querySelector('.sn-inner') || 
@@ -185,21 +164,12 @@ def handle_cookie_consent(sb) -> bool:
             document.body.style.overflow = '';
             document.documentElement.style.overflow = '';
         """)
-        print("[INFO] Cookie 弹窗已通过 JS 强制移除")
-        time.sleep(0.5)
-        if not sb.is_element_visible("#accept-choices"):
-            return True
     except Exception:
         pass
     return False
 
 # ---------- Turnstile 处理 ----------
 def _turnstile_token_ready(sb) -> bool:
-    """
-    严格检查 Turnstile token 是否真正有效
-    1. input[name='cf-turnstile-response'] 的 value 长度 > 20
-    2. Turnstile 内部 #success 图标可见
-    """
     try:
         token_ok = sb.execute_script("""
             var inp = document.querySelector("input[name='cf-turnstile-response']");
@@ -209,39 +179,21 @@ def _turnstile_token_ready(sb) -> bool:
             return True
     except Exception:
         pass
+    return False
 
+def _try_click_turnstile(sb) -> bool:
     try:
-        success_visible = sb.execute_script("""
-            var s = document.getElementById('success');
-            if (!s) return false;
-            var style = window.getComputedStyle(s);
-            return style.display !== 'none' && style.visibility !== 'hidden';
-        """)
-        if success_visible:
-            return True
+        sb.uc_gui_click_captcha()
+        return True
     except Exception:
         pass
 
-    return False
-
-
-def _try_click_turnstile(sb) -> bool:
-    """尝试多种方式点击 Turnstile"""
-    try:
-        sb.uc_gui_click_captcha()
-        print("[INFO] Turnstile: uc_gui_click_captcha 触发")
-        return True
-    except Exception as e:
-        print(f"[DEBUG] uc_gui_click_captcha 失败: {e}")
-
     try:
         sb.switch_to_frame("iframe[src*='challenges.cloudflare']")
-        sb.click("input[type='checkbox'], .cb-lb", timeout=3)
+        sb.click("input[type='checkbox'], .cb-lb", timeout=2)
         sb.switch_to_default_content()
-        print("[INFO] Turnstile: iframe 内点击成功")
         return True
-    except Exception as e:
-        print(f"[DEBUG] iframe 点击失败: {e}")
+    except Exception:
         try:
             sb.switch_to_default_content()
         except Exception:
@@ -252,19 +204,12 @@ def _try_click_turnstile(sb) -> bool:
             var ts = document.querySelector('.cf-turnstile');
             if (ts) ts.click();
         """)
-        print("[INFO] Turnstile: JS 点击 .cf-turnstile")
         return True
-    except Exception as e:
-        print(f"[DEBUG] JS 点击 .cf-turnstile 失败: {e}")
-
+    except Exception:
+        pass
     return False
 
-
-def wait_turnstile(sb, timeout: int = 90) -> bool:
-    """
-    等待 Cloudflare Turnstile 完成验证，成功返回 True，失败返回 False
-    """
-    # 检查是否存在 Turnstile 组件
+def wait_turnstile(sb, timeout: int = 60) -> bool:
     try:
         has = sb.execute_script("""
             return !!(
@@ -277,47 +222,136 @@ def wait_turnstile(sb, timeout: int = 90) -> bool:
         has = False
 
     if not has:
-        print("[INFO] 无 Turnstile 组件，跳过")
         return True
 
     print("[INFO] 发现 Turnstile，开始等待验证完成...")
-
-    # 滚动到验证区
-    try:
-        sb.execute_script("""
-            var ts = document.querySelector('.cf-turnstile');
-            if (ts) ts.scrollIntoView({block:'center'});
-        """)
-    except Exception:
-        pass
-
-    start      = time.time()
+    start = time.time()
     last_click = 0
 
     while time.time() - start < timeout:
-        # 严格检查 token
         if _turnstile_token_ready(sb):
             print("[INFO] ✅ Turnstile 验证完成")
-            time.sleep(0.5)
+            time.sleep(2)  # 给页面跳转预留时间
             return True
-
+            
         now = time.time()
-        if now - last_click >= 3:
+        if now - last_click >= 4:
             _try_click_turnstile(sb)
             last_click = now
 
         time.sleep(1)
 
-    # 超时最终检查
     if _turnstile_token_ready(sb):
-        print("[INFO] ✅ Turnstile 超时后仍成功")
         return True
 
-    print("[WARN] ⚠️ Turnstile 等待超时，验证未完成")
+    print("[WARN] ⚠️ Turnstile 等待超时")
     return False
 
 
-# ---------- 处理广告弹窗 ----------
+# ---------- 登录表单核心逻辑 (重构优化) ----------
+def robust_fill_form(sb, email: str, password: str) -> bool:
+    """尝试使用多种方式填充账号密码，应对前端页面结构变化"""
+    email_selectors = [
+        "input[type='email']", 
+        "input[name='email']", 
+        "#email-address", 
+        "input[placeholder*='email' i]"
+    ]
+    pwd_selectors = [
+        "input[type='password']", 
+        "input[name='password']", 
+        "#password", 
+        "input[placeholder*='password' i]"
+    ]
+    
+    # 1. 寻找邮箱输入框
+    found_email_sel = None
+    for sel in email_selectors:
+        if sb.is_element_visible(sel):
+            found_email_sel = sel
+            break
+            
+    # 如果没找到，给一点硬等待容错（可能是 React 刚挂载完成）
+    if not found_email_sel:
+        try:
+            sb.wait_for_element_visible("input[type='email'], input[name='email'], #email-address", timeout=10)
+            for sel in email_selectors:
+                if sb.is_element_visible(sel):
+                    found_email_sel = sel
+                    break
+        except Exception:
+            pass
+
+    if not found_email_sel:
+        raise Exception("超时未找到邮箱输入框，可能页面未加载或被 Cloudflare 拦截")
+
+    # 2. 寻找密码输入框
+    found_pwd_sel = None
+    for sel in pwd_selectors:
+        if sb.is_element_visible(sel):
+            found_pwd_sel = sel
+            break
+
+    if not found_pwd_sel:
+        raise Exception("找到邮箱输入框，但未找到密码输入框")
+
+    # 3. 强力清空与注入输入 (结合 JS 赋值与 Selenium 输入)
+    try:
+        # 邮箱
+        sb.execute_script(f"""
+            let el = document.querySelector("{found_email_sel}");
+            el.value = '';
+            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        """)
+        sb.type(found_email_sel, email)
+        
+        # 密码
+        sb.execute_script(f"""
+            let el = document.querySelector("{found_pwd_sel}");
+            el.value = '';
+            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        """)
+        sb.type(found_pwd_sel, password)
+        
+        print(f"[INFO] 成功填写表单 (使用了选择器: {found_email_sel})")
+        return True
+    except Exception as e:
+        raise Exception(f"表单注入失败: {e}")
+
+def robust_submit_form(sb) -> bool:
+    submit_selectors = [
+        "button[type='submit']",
+        "button[name='submit']",
+        "button:contains('Login')",
+        "button:contains('Sign In')"
+    ]
+    try:
+        # 方法一：尝试回车提交
+        sb.press_keys("input[type='password']", "\n")
+        print("[INFO] 尝试使用回车键提交...")
+        time.sleep(2)
+        if "/auth/login" not in safe_get_url(sb):
+            return True
+            
+        # 方法二：点击提交按钮
+        for sel in submit_selectors:
+            if sb.is_element_visible(sel):
+                sb.click(sel)
+                print(f"[INFO] 点击了提交按钮 ({sel})")
+                return True
+                
+        # 方法三：JS 点击
+        sb.execute_script("document.querySelector('button[type=\"submit\"]').click();")
+        print("[INFO] 使用 JS 点击了提交按钮")
+        return True
+    except Exception as e:
+        print(f"[WARN] 提交表单时发生异常: {e}")
+        return False
+
+
+# ---------- 广告弹窗、控制台判定 ----------
 def handle_ad_modal(sb, server_id: str) -> bool:
     try:
         if sb.is_element_visible("#adModal"):
@@ -330,8 +364,6 @@ def handle_ad_modal(sb, server_id: str) -> bool:
         pass
     return False
 
-
-# ---------- 获取控制台页面的服务器状态 ----------
 def get_console_status(sb) -> str:
     try:
         elem = sb.find_element("#csb-status-text", timeout=5)
@@ -339,13 +371,11 @@ def get_console_status(sb) -> str:
     except Exception:
         return "unknown"
 
-
 def is_offline(status: str) -> bool:
     s = status.lower()
     return "offline" in s or "unknown" in s or s == ""
 
-
-# ---------- 从页面解析服务器列表 ----------
+# ---------- 页面服务器列表解析 ----------
 def fetch_servers_from_page(sb, email: str) -> Tuple[List[Dict], str]:
     email_safe = email_to_filename(email)
     sb.open(BASE_URL)
@@ -380,7 +410,7 @@ def fetch_servers_from_page(sb, email: str) -> Tuple[List[Dict], str]:
                             break
                     except Exception:
                         pass
-                print(f"[INFO]  [{idx+1}] {name}")          # 日志中显示短ID
+                print(f"[INFO]  [{idx+1}] {name}")
                 servers.append({"id": server_id, "name": name})
             except Exception as e:
                 print(f"[WARN] 解析第 {idx+1} 行失败: {e}")
@@ -388,11 +418,10 @@ def fetch_servers_from_page(sb, email: str) -> Tuple[List[Dict], str]:
         print(f"[ERROR] 查找服务器行失败: {e}")
 
     last_shot = shot(sb, f"parsed-{len(servers)}svr-{email_safe}")
-    print(f"[INFO] 共解析 {len(servers)} 个服务器")
     return servers, last_shot
 
 
-# ---------- 检查并重启单个服务器 ----------
+# ---------- 单个服务器重启逻辑 ----------
 def check_and_restart_server(
     sb, server_id: str, server_name: str
 ) -> Tuple[bool, str, str]:
@@ -404,8 +433,7 @@ def check_and_restart_server(
         sb.open(console_url)
         time.sleep(random.uniform(2, 5))
 
-        # 循环确认 cookie 弹窗消失
-        for _ in range(5):
+        for _ in range(3):
             if not sb.is_element_visible("#accept-choices"):
                 break
             handle_cookie_consent(sb)
@@ -419,11 +447,10 @@ def check_and_restart_server(
             last_shot = shot(sb, f"online-{sid_short}")
             return True, f"在线 ({status})", last_shot
 
-        # 点击 Start
         try:
             sb.click("#startbutton", timeout=5)
             print(f"[INFO] 已点击 Start（{attempt+1}/{AD_RETRY_LIMIT}）")
-            time.sleep(5)
+            time.sleep(6)
             last_shot = shot(sb, f"after-start-{sid_short}-a{attempt+1}")
         except Exception as e:
             print(f"[WARN] 点击 Start 失败: {e}")
@@ -443,7 +470,7 @@ def check_and_restart_server(
     return False, "重启失败（超出重试次数）", last_shot
 
 
-# ---------- 登录并处理所有服务器 ----------
+# ---------- 主控：登录并处理 ----------
 def login_and_restart(email: str, password: str, proxy: Optional[str]) -> Dict:
     result = {
         "success": False,
@@ -471,15 +498,22 @@ def login_and_restart(email: str, password: str, proxy: Optional[str]) -> Dict:
 
             sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=10.0)
             time.sleep(3)
-            shot(sb, f"login-open-{email_safe}-a{attempt+1}")
+            
+            # 检测是否被 Cloudflare 彻底墙了 403
+            src_lower = safe_get_source(sb).lower()
+            if "access denied" in src_lower or "403 forbidden" in src_lower or "attention required" in src_lower:
+                print("[ERROR] IP 被 Cloudflare 拦截拒绝访问 (Access Denied / 403)。")
+                shot(sb, f"ip-blocked-{email_safe}")
+                result["message"] = "IP被墙"
+                return result
 
+            shot(sb, f"login-open-{email_safe}-a{attempt+1}")
             cur = safe_get_url(sb)
             if "/auth/login" not in cur:
                 print("[INFO] Session 有效，已自动跳转")
                 logged_in = True
                 break
 
-            # 处理 Turnstile
             print("[INFO] 处理登录盾（Turnstile）...")
             turnstile_ok = wait_turnstile(sb, timeout=90)
             shot(sb, f"after-turnstile-{email_safe}-a{attempt+1}")
@@ -488,38 +522,26 @@ def login_and_restart(email: str, password: str, proxy: Optional[str]) -> Dict:
                 print("[WARN] Turnstile 未完成，重试本次登录")
                 continue
 
-            # 填写表单
+            # 使用优化版的强力表单填充
             try:
-                sb.wait_for_element_visible("#email-address", timeout=10)
-                sb.execute_script("document.querySelector('#email-address').value = '';")
-                sb.type("#email-address", email)
-                sb.execute_script("document.querySelector('#password').value = '';")
-                sb.type("#password", password)
-                print("[INFO] 表单填写完毕")
+                robust_fill_form(sb, email, password)
             except Exception as e:
-                print(f"[ERROR] 填写表单失败: {e}")
+                print(f"[ERROR] {e}")
                 shot(sb, f"form-error-{email_safe}-a{attempt+1}")
                 continue
 
-            # 再次确认 token 仍然有效
+            # 再次确认 token 是否失效
             if not _turnstile_token_ready(sb):
-                print("[INFO] 填表后 token 丢失，重新等待 Turnstile...")
-                if not wait_turnstile(sb, timeout=30):
-                    print("[WARN] token 未能恢复，重试登录")
-                    continue
+                print("[INFO] 填表后 CF Token 可能刷新，等待缓冲...")
+                time.sleep(2)
 
             shot(sb, f"before-submit-{email_safe}-a{attempt+1}")
 
-            # 提交
-            try:
-                sb.click("button[name='submit']", timeout=5)
-                print("[INFO] 表单已提交")
-            except Exception as e:
-                print(f"[ERROR] 提交失败: {e}")
-                shot(sb, f"submit-error-{email_safe}-a{attempt+1}")
-                continue
-
-            time.sleep(6)
+            # 提交表单
+            if robust_submit_form(sb):
+                print("[INFO] 表单已提交请求")
+            
+            time.sleep(6) # 提交后等待请求反馈
             shot(sb, f"after-submit-{email_safe}-a{attempt+1}")
 
             cur = safe_get_url(sb)
@@ -528,20 +550,20 @@ def login_and_restart(email: str, password: str, proxy: Optional[str]) -> Dict:
                 print(f"[INFO] ✅ 登录成功 → {cur}")
                 break
 
-            # 检查错误提示
+            # 错误提示判断
             src = safe_get_source(sb).lower()
-            if any(kw in src for kw in ("invalid", "incorrect", "failed", "wrong")):
-                print("[ERROR] 检测到登录错误提示，停止重试")
+            if any(kw in src for kw in ("invalid", "incorrect", "failed", "wrong credential")):
+                print("[ERROR] 检测到账号或密码错误提示，停止重试")
                 break
 
             print(f"[WARN] 仍在登录页，将重试")
 
         if not logged_in:
-            result["message"] = "登录失败"
+            result["message"] = "登录失败，可能是UI变更或网络问题"
             result["screenshots"] = [shot(sb, f"login-fail-{email_safe}")]
             return result
 
-        # 注入全局弹窗清除脚本
+        # 清除遮挡弹窗
         try:
             sb.execute_script("""
                 setInterval(function() {
@@ -549,22 +571,19 @@ def login_and_restart(email: str, password: str, proxy: Optional[str]) -> Dict:
                     if (btn) {
                         var container = btn.closest('.sn-inner') || btn.parentElement;
                         if (container) container.remove();
-                        console.log('Auto-removed cookie popup');
                     }
-                }, 500);
+                }, 1000);
             """)
-            print("[INFO] 已注入全局弹窗自动清除脚本")
         except Exception:
             pass
 
-        # 获取服务器列表
+        # 解析与重启服务器
         servers, list_shot = fetch_servers_from_page(sb, email)
         result["screenshots"].append(list_shot)
         if not servers:
             result["message"] = "未找到服务器"
             return result
 
-        # 逐台检查
         result["servers_checked"] = len(servers)
         restarted = 0
         for idx, svr in enumerate(servers, 1):
@@ -585,7 +604,7 @@ def login_and_restart(email: str, password: str, proxy: Optional[str]) -> Dict:
         return result
 
 
-# ---------- 主函数 ----------
+# ---------- 启动入口 ----------
 def main():
     proxy   = os.environ.get("PROXY_SERVER")
     display = None
@@ -622,7 +641,7 @@ def main():
         )
 
         if idx < len(accounts):
-            delay = random.randint(10, 30)
+            delay = random.randint(10, 25)
             print(f"[INFO] 等待 {delay}s 后处理下一账号...")
             time.sleep(delay)
 
